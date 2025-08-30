@@ -7,51 +7,6 @@ from langchain_openai import ChatOpenAI
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-
-def generate_dataset_context(df: pd.DataFrame) -> str:
-    """Generate a comprehensive context string about the dataset for the LLM"""
-    
-    # Basic info
-    num_rows, num_cols = df.shape
-    
-    # Column information with types and sample values
-    column_info = []
-    for col in df.columns:
-        dtype = str(df[col].dtype)
-        non_null_count = df[col].count()
-        null_count = df[col].isnull().sum()
-        
-        # Get sample values (non-null)
-        sample_values = df[col].dropna().unique()[:3]  # First 3 unique values
-        sample_str = ', '.join([str(v) for v in sample_values])
-        if len(df[col].dropna().unique()) > 3:
-            sample_str += '...'
-        
-        column_info.append(f"  • {col} ({dtype}): {non_null_count} non-null values, examples: {sample_str}")
-    
-    # Identify numeric and categorical columns
-    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-    categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
-    
-    context = f"""
-DATASET CONTEXT:
-📊 Shape: {num_rows:,} rows × {num_cols} columns
-
-📋 COLUMNS ({num_cols} total):
-{chr(10).join(column_info)}
-
-🔢 NUMERIC COLUMNS ({len(numeric_cols)}): {', '.join(numeric_cols)}
-📝 CATEGORICAL COLUMNS ({len(categorical_cols)}): {', '.join(categorical_cols)}
-
-💡 ANALYSIS CAPABILITIES:
-- Use numeric columns for: correlations, histograms, scatter plots, statistical analysis
-- Use categorical columns for: bar charts, top categories, grouping operations
-- Create new columns by combining existing ones
-- All column names are available for direct use in tools
-"""
-    
-    return context
-
 try:
     from .mcp_tools import (
         RunPandasQueryTool,
@@ -64,10 +19,7 @@ try:
         CreateBarChartTool,
         CreateScatterPlotTool,
         CreateLineChartTool,
-        CreateColumnTool,
-        TimeSeriesAnalysisTool,
-        CreateTimeSeriesChartTool,
-        CreateCorrelationHeatmapTool
+        CreateColumnTool
     )
 except ImportError:
     from mcp_tools import (
@@ -81,24 +33,18 @@ except ImportError:
         CreateBarChartTool,
         CreateScatterPlotTool,
         CreateLineChartTool,
-        CreateColumnTool,
-        TimeSeriesAnalysisTool,
-        CreateTimeSeriesChartTool,
-        CreateCorrelationHeatmapTool
+        CreateColumnTool
     )
 
 
 def run_mcp_planner(user_query: str, df: pd.DataFrame, chat_history: List[Dict] = None) -> Dict[str, Any]:
     """
     Tool-calling agent wired to your RunPandasQueryTool.
-    Now includes chat history for context preservation and automatic dataset context.
+    Now includes chat history for context preservation.
     Returns the AgentExecutor invoke() output (dict with 'output' and possibly intermediate steps).
     """
     if chat_history is None:
         chat_history = []
-
-    # Generate dataset context automatically
-    dataset_context = generate_dataset_context(df)
 
     # 1) Instantiate your tools
     pandas_query_tool = RunPandasQueryTool(df=df)
@@ -114,37 +60,30 @@ def run_mcp_planner(user_query: str, df: pd.DataFrame, chat_history: List[Dict] 
     scatter_plot_tool = CreateScatterPlotTool(df=df)
     line_chart_tool = CreateLineChartTool(df=df)
     
-    # Time series analysis tools
-    time_series_analysis_tool = TimeSeriesAnalysisTool(df=df)
-    correlation_heatmap_tool = CreateCorrelationHeatmapTool(df=df)
-    
     # Data transformation tools
     create_column_tool = CreateColumnTool(df=df)
     
     tools = [
         pandas_query_tool, groupby_tool, top_categories_tool, histogram_tool, 
         correlation_tool, dataset_preview_tool, histogram_chart_tool, 
-        bar_chart_tool, scatter_plot_tool, line_chart_tool, create_column_tool,
-        time_series_analysis_tool, correlation_heatmap_tool
+        bar_chart_tool, scatter_plot_tool, line_chart_tool, create_column_tool
     ]
 
     # 2) LLM (swap to Claude/Gemini later by changing the Chat* class)
     llm = ChatOpenAI(model="gpt-4o", temperature=0)
 
-    # 3) Enhanced prompt with dataset context and chat history
+    # 3) Enhanced prompt with chat history context
     prompt = ChatPromptTemplate.from_messages([
         ("system",
          "You are a careful data analysis assistant. "
-         "You have access to a pandas DataFrame named `df` and several specialized tools.\n\n"
-         f"{dataset_context}\n\n"
+         "You have access to a pandas DataFrame named `df` and several specialized tools:\n\n"
          "DATA ANALYSIS TOOLS:\n"
          "- dataset_preview: Get a complete view of the dataset with ALL columns visible (use this instead of df.head())\n"
          "- run_pandas_query: For custom pandas expressions (use ONLY when specialized tools can't do the job)\n"
          "- groupby_aggregate: Group data and calculate aggregations (mean, sum, count, etc.) - USE THIS for any grouping questions\n"
          "- top_categories: Find most frequent values in categorical columns - USE THIS for 'top X' questions\n"
          "- histogram: Analyze distribution of numeric columns - USE THIS for distribution/histogram questions\n"
-         "- correlation_matrix: Calculate correlations between numeric columns - USE THIS for correlation questions\n"
-         "- time_series_analysis: Analyze trends and patterns over time - AUTOMATICALLY CREATES CHARTS\n\n"
+         "- correlation_matrix: Calculate correlations between numeric columns - USE THIS for correlation questions\n\n"
          "DATA TRANSFORMATION TOOLS:\n"
          "- create_column: Create new columns using pandas operations (calculations, conditions, transformations)\n"
          "  Examples: create opponent column, calculate ratios, create categorical bins, etc.\n\n"
@@ -152,19 +91,17 @@ def run_mcp_planner(user_query: str, df: pd.DataFrame, chat_history: List[Dict] 
          "- create_histogram_chart: Create visual histogram charts for numeric data distributions\n"
          "- create_bar_chart: Create visual bar charts for categorical data (top categories, counts)\n"
          "- create_scatter_plot: Create scatter plots to visualize relationships between two numeric variables\n"
-         "- create_line_chart: Create line charts for trends over time or ordered data\n"
-         "- create_correlation_heatmap: Create visual correlation heatmaps showing variable relationships\n\n"
+         "- create_line_chart: Create line charts for trends over time or ordered data\n\n"
          "PRIORITY GUIDELINES:\n"
-         "1. You KNOW the dataset structure - use the column names directly without needing dataset_preview\n"
-         "2. For visualization requests (charts, plots, graphs), ALWAYS use the chart creation tools\n"
-         "3. When users ask to 'show', 'plot', 'visualize', or 'chart' data, use create_*_chart tools\n"
-         "4. For creating new columns or data transformations, use create_column tool\n"
-         "5. Always try specialized tools FIRST. Only use run_pandas_query as a last resort\n"
-         "6. Use the provided column information to answer questions immediately\n"
-         "7. For analysis + visualization, do the analysis first, then create the chart\n\n"
-         "SMART ANALYSIS: You can immediately answer questions about available columns, data types, "
-         "and suggest appropriate analysis without running dataset_preview first. Use your knowledge "
-         "of the dataset structure to provide intelligent recommendations."),
+         "1. For visualization requests (charts, plots, graphs), ALWAYS use the chart creation tools\n"
+         "2. When users ask to 'show', 'plot', 'visualize', or 'chart' data, use create_*_chart tools\n"
+         "3. For creating new columns or data transformations, use create_column tool\n"
+         "4. Always try specialized tools FIRST. Only use run_pandas_query as a last resort\n"
+         "5. Use dataset_preview instead of df.head() to see ALL columns without truncation\n"
+         "6. For analysis + visualization, do the analysis first, then create the chart\n\n"
+         "CONTEXT: You maintain context across the conversation - if you've previously identified "
+         "information about the dataset (like column names, data types, etc.), remember it. "
+         "Refer to previous analysis and build upon it in your responses."),
         MessagesPlaceholder(variable_name="chat_history"),
         ("user", "{input}"),
         MessagesPlaceholder(variable_name="agent_scratchpad"),
